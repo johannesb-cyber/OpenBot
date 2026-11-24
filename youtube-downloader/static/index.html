@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Downloader</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1c1c1a; --muted: #6b6b66;
+    --border: #e2e2dd; --accent: #d93025; --accent-text: #fff; --track: #ececea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --card: #1f1f1d; --text: #ececea; --muted: #9a9a94;
+      --border: #33332f; --accent: #ef5350; --accent-text: #fff; --track: #2c2c29;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center; padding: 48px 16px;
+  }
+  main { width: 100%; max-width: 620px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  form { display: flex; gap: 8px; }
+  input[type=url], select {
+    flex: 1; min-width: 0; padding: 11px 14px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 11px 18px; font: inherit; font-weight: 600; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-text); cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .video { display: flex; gap: 16px; align-items: flex-start; }
+  .video img { width: 168px; aspect-ratio: 16/9; object-fit: cover; border-radius: 8px; flex-shrink: 0; }
+  .video h2 { font-size: 1.05rem; margin: 0 0 4px; }
+  .meta { color: var(--muted); font-size: .9rem; }
+  .options { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+  .seg { display: flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .seg label { padding: 10px 14px; cursor: pointer; }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--accent); font-weight: 600; }
+  .bar { height: 8px; background: var(--track); border-radius: 99px; overflow: hidden; margin: 12px 0 6px; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .bar.indeterminate div { width: 30%; animation: slide 1.2s infinite ease-in-out; }
+  @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  .error { color: var(--accent); }
+  .hidden { display: none; }
+  .note { color: var(--muted); font-size: .85rem; margin-top: 24px; }
+  @media (max-width: 520px) {
+    form { flex-direction: column; }
+    .video { flex-direction: column; }
+    .video img { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>YouTube Downloader</h1>
+  <p class="sub">Link einfügen, Format wählen, herunterladen.</p>
+
+  <div class="card">
+    <form id="lookup">
+      <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…" required autofocus>
+      <button id="lookupBtn">Laden</button>
+    </form>
+    <p id="lookupError" class="error hidden"></p>
+  </div>
+
+  <div id="videoCard" class="card hidden">
+    <div class="video">
+      <img id="thumb" alt="">
+      <div>
+        <h2 id="title"></h2>
+        <div class="meta" id="meta"></div>
+      </div>
+    </div>
+    <div class="options">
+      <div class="seg">
+        <label><input type="radio" name="mode" value="video" checked><span>Video (MP4)</span></label>
+        <label><input type="radio" name="mode" value="audio"><span id="audioLabel">Nur Ton (MP3)</span></label>
+      </div>
+      <select id="quality"></select>
+      <button id="dlBtn">Herunterladen</button>
+    </div>
+  </div>
+
+  <div id="progressCard" class="card hidden">
+    <div id="progressText">Wird vorbereitet …</div>
+    <div class="bar indeterminate" id="bar"><div></div></div>
+    <div class="meta" id="progressMeta"></div>
+  </div>
+
+  <p class="note">Lade nur Videos herunter, an denen du die Rechte hast oder deren Download erlaubt ist.
+    Dateien landen zusätzlich im Ordner <code>downloads</code> neben der App.</p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function fmtDuration(s) {
+  if (!s) return "";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = Math.floor(s % 60);
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body ? {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+  } : undefined);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+  return data;
+}
+
+$("lookup").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const url = $("url").value.trim();
+  $("lookupError").classList.add("hidden");
+  $("videoCard").classList.add("hidden");
+  $("progressCard").classList.add("hidden");
+  $("lookupBtn").disabled = true; $("lookupBtn").textContent = "Lädt …";
+  try {
+    const info = await api("/api/info", {url});
+    current = {url, info};
+    $("thumb").src = info.thumbnail || "";
+    $("thumb").classList.toggle("hidden", !info.thumbnail);
+    $("title").textContent = info.title;
+    $("meta").textContent = [info.uploader, fmtDuration(info.duration)].filter(Boolean).join(" · ");
+    const q = $("quality");
+    q.innerHTML = "";
+    q.add(new Option("Beste Qualität", ""));
+    info.heights.forEach(h => q.add(new Option(h + "p", h)));
+    if (!info.ffmpeg) $("audioLabel").textContent = "Nur Ton (Original)";
+    $("videoCard").classList.remove("hidden");
+  } catch (err) {
+    $("lookupError").textContent = err.message;
+    $("lookupError").classList.remove("hidden");
+  } finally {
+    $("lookupBtn").disabled = false; $("lookupBtn").textContent = "Laden";
+  }
+});
+
+document.querySelectorAll("input[name=mode]").forEach(r =>
+  r.addEventListener("change", () => { $("quality").disabled = r.value === "audio" && r.checked; }));
+
+$("dlBtn").addEventListener("click", async () => {
+  if (!current) return;
+  const mode = document.querySelector("input[name=mode]:checked").value;
+  $("dlBtn").disabled = true;
+  $("progressCard").classList.remove("hidden");
+  $("progressText").textContent = "Wird vorbereitet …";
+  $("progressText").classList.remove("error");
+  $("progressMeta").textContent = "";
+  $("bar").classList.add("indeterminate");
+  try {
+    const {id} = await api("/api/download", {url: current.url, mode, quality: $("quality").value});
+    poll(id);
+  } catch (err) { fail(err.message); }
+});
+
+function fail(msg) {
+  $("progressText").textContent = msg;
+  $("progressText").classList.add("error");
+  $("bar").classList.remove("indeterminate");
+  $("bar").firstElementChild.style.width = "0";
+  $("dlBtn").disabled = false;
+}
+
+async function poll(id) {
+  let s;
+  try { s = await api("/api/status/" + id); } catch (err) { return fail(err.message); }
+  const bar = $("bar"), fill = bar.firstElementChild;
+  if (s.state === "downloading" && s.percent != null) {
+    bar.classList.remove("indeterminate");
+    fill.style.width = s.percent + "%";
+    $("progressText").textContent = `Lädt herunter … ${s.percent} %`;
+    $("progressMeta").textContent = [s.speed, s.eta && "noch " + s.eta].filter(Boolean).join(" · ");
+  } else if (s.state === "processing") {
+    bar.classList.add("indeterminate");
+    $("progressText").textContent = "Wird umgewandelt …";
+    $("progressMeta").textContent = "";
+  } else if (s.state === "done") {
+    bar.classList.remove("indeterminate");
+    fill.style.width = "100%";
+    $("progressText").textContent = "Fertig: " + s.name;
+    $("progressMeta").textContent = "";
+    $("dlBtn").disabled = false;
+    window.location.href = "/api/file/" + id;
+    return;
+  } else if (s.state === "error") {
+    return fail("Fehler: " + s.error);
+  }
+  setTimeout(() => poll(id), 700);
+}
+</script>
+</body>
+</html>
